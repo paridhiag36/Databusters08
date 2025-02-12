@@ -1,0 +1,305 @@
+---
+title: "DSE_CaseComp_Final"
+author: "Agarwal Paridhi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(tseries)
+library(lubridate)
+library(ggplot2)
+library(reshape2)
+library(vars)
+library(forecast)
+
+```
+```{r}
+qd = read.csv("/Users/paridhiagarwal/Downloads/Databusters-main/Quarterly Data.csv")
+qd = qd %>% rename('Real_GDP' = 'GDPC1')
+```
+
+
+```{r}
+missing_info <- colSums(is.na(qd))  # Count missing values per column
+cols_with_many_nas <- names(missing_info[missing_info > 90])  # Get column names with more than 90 missing vals
+```
+
+```{r}
+# We remove the columns with more than 90 missing vals
+qd <- qd %>%
+  select(-all_of(cols_with_many_nas))
+
+# We remove the first two rows since they contain unneccesary information
+qd = qd %>% slice(-(1:2))
+```
+
+```{r}
+# Adding GDP Grwoth variable here
+qd <- qd %>%
+  mutate(GDP_growth = (Real_GDP - lag(Real_GDP)) / lag(Real_GDP) * 100)
+
+# Add a binary target variable for contraction (1 if GDP growth < 0)
+qd <- qd %>%
+  mutate(contraction = ifelse(GDP_growth < 0, 1, 0))
+```
+
+```{r}
+qd %>%
+  select(GDP_growth, contraction) %>%  # Select only the specified columns
+  slice_head(n = 15)  # Display the first 15 rows
+```
+
+```{r}
+# Replace NA values with median of the respective column
+df_clean <- qd %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+```
+
+```{r}
+# Dickey Fuller Test
+numeric_df <- df_clean[, sapply(df_clean, is.numeric)]
+adf_results <- lapply(numeric_df, function(x) adf.test(x))
+# Print out the results for each column
+# for (col_name in names(adf_results)) {
+#   cat("ADF Test for column:", col_name, "\n")
+#   print(adf_results[[col_name]])
+#   cat("\n")
+# }
+
+# Display interpretation of results for each column
+# for (col_name in names(adf_results)) {
+#   p_value <- adf_results[[col_name]]$p.value
+#   if (p_value < 0.05) {
+#     cat(col_name, "is stationary (reject the null hypothesis of a unit root).\n")
+#   }
+# }
+
+names(adf_results)
+# This dickey fuller test shows us that the Real GDP is infact a stationary variable. This means we can train a Time series model on Real GDP to predict it for the next few quarters.
+
+```
+
+```{r}
+
+#Time series analysis
+ts_gdp = df_clean %>% select(sasdate, Real_GDP, GDP_growth)
+
+# Convert 'sasdate' from character to Date format
+ts_gdp$sasdate <- as.Date(ts_gdp$sasdate, format = "%m/%d/%Y")
+# Convert Date to Year-Quarter format
+ts_gdp$year_quarter <- paste0(year(ts_gdp$sasdate), "-Q", quarter(ts_gdp$sasdate))
+
+print(ts_gdp$year_quarter)
+```
+
+```{r}
+# Ensure that GDP growth rate is numeric
+ts_gdp$GDP_growth=as.numeric(ts_gdp$GDP_growth)
+
+# Convert to time series object
+ts_gdp = ts(ts_gdp$GDP_growth, start = c(1959,3), frequency = 4)
+
+#Plot the time series
+plot(ts_gdp)
+```
+
+```{r}
+# ARIMA model
+
+fit = auto.arima(ts_gdp)
+
+
+# Step 1: Fit the ARIMA model to the historical data
+fit <- auto.arima(ts_gdp)
+
+# Step 2: Forecast the GDP growth for the next 5 quarters 
+forecast_arima <- forecast(fit, h=5)  # h=5 to forecast the next 5 quarters
+
+# Step 3: Extract the forecasted values and confidence intervals
+forecast_values <- forecast_arima$mean       # Point forecast (predicted GDP growth)
+conf_int_80_lower <- forecast_arima$lower[, 1]  # Lo 80 (80% confidence interval lower bound)
+conf_int_80_upper <- forecast_arima$upper[, 1]  # Hi 80 (80% confidence interval upper bound)
+conf_int_95_lower <- forecast_arima$lower[, 2]  # Lo 95 (95% confidence interval lower bound)
+
+conf_int_95_upper <- forecast_arima$upper[, 2]  # Hi 95 (95% confidence interval upper bound)
+
+
+
+#Step 5: Display the results for the quarters of interest (Q1 2025, Q2 2025, Q4 2025)
+contraction_results <- data.frame(
+  Quarter = c("Q4 2024", "Q1 2025", "Q2 2025", "Q3 2025", "Q4 2025"),  #Added Q1 2026 for the 4th forecasted quarter
+  Point_Forecast = forecast_values,
+  Lo_80 = conf_int_80_lower,
+  Hi_80 = conf_int_80_upper,
+  Lo_95 = conf_int_95_lower,
+  Hi_95 = conf_int_95_upper)
+
+
+#Print the results for the quarters of interest
+print(contraction_results)
+
+# Plot the forecast with confidence intervals
+autoplot(forecast_arima) +
+  ggtitle("ARIMA Forecast of GDP Growth with Confidence Intervals") +
+  xlab("Year-Quarter") +
+  ylab("GDP Growth Rate") +
+  theme_minimal()
+
+```
+
+
+```{r}
+#var model
+ts_gdp_var = df_clean[,c('sasdate', 'CNCFx', 'GDP_growth')]
+ts_gdp_var = ts_gdp_var%>% rename('Real Disposable Business Income' = 'CNCFx')
+
+# Convert 'sasdate' from character to Date format
+ts_gdp_var$sasdate <- as.Date(ts_gdp_var$sasdate, format = "%m/%d/%Y")
+
+# Convert Date to Year-Quarter format
+ts_gdp_var$sasdate <- as.yearqtr(ts_gdp_var$sasdate)
+
+# Convert the "Year-Quarter" column to a time series format
+ts_gdp$sasdate <- as.yearqtr(ts_gdp_var$sasdate, format = "%Y Q%q")
+.
+# Convert to a time series object
+ts_gdp_xts <- ts_gdp_var[ , c("GDP_growth", "Real Disposable Business Income")]
+
+# Convert to time-series matrix
+ts_gdp_xts <- ts(ts_gdp_xts, start = c(1959, 3), frequency = 4)  # Quarterly data
+
+#finding optimal lag
+VARselect(ts_gdp_xts, lag.max = 8, type = "const")
+
+optimal_lag <- 2
+
+
+#fitting var model
+var_model <- VAR(ts_gdp_xts, p = optimal_lag, type = "const")
+
+#forecasting
+forecast_var <- predict(var_model, n.ahead = 5)
+
+
+#looking at forecasted values (fcst = forecasted gdp growth for each quarter)
+gdp_forecast <- forecast_var$fcst$GDP_growth
+print(gdp_forecast)
+```
+
+```{r}
+# We work with df_clean again to conduct Principal Component Analysis
+quarterly_gdp_numeric <- df_clean[, sapply(df_clean, is.numeric)]
+# Drop 'Real_GDP' column
+quarterly_gdp_numeric <- quarterly_gdp_numeric %>%
+  #select(-Real_GDP) %>%
+  select(names(adf_results))
+
+# Standardize the remaining columns
+quarterly_gdp_standardized <- scale(quarterly_gdp_numeric)
+
+# Perform PCA on the standardized data
+pca_result <- prcomp(quarterly_gdp_standardized)
+pca_result
+
+```
+
+```{r}
+# Get the standard deviations (sqrt of the eigenvalues) for each principal component
+explained_variance <- pca_result$sdev^2
+
+# Get the index of the principal component that explains the most variance
+most_varied_pc_index <- which.max(explained_variance)
+
+# Get the name of the principal component that explains the most variance
+most_varied_pc_name <- paste("PC", most_varied_pc_index, sep = "")
+
+# Print the results
+cat("The principal component that explains the most variance is:", most_varied_pc_name, "\n")
+cat("The variance explained by this PC is:", explained_variance[most_varied_pc_index], "\n")
+
+# You can also view the proportion of variance explained by this PC
+explained_proportion <- explained_variance[most_varied_pc_index] / sum(explained_variance)
+print(explained_proportion)
+
+# Print the proportion of variance explained by each PC
+#cat("Proportion of variance explained by each PC:\n")
+#print(explained_proportion)
+
+```
+
+```{r}
+# If 'Real_GDP' was removed, add it back temporarily to the dataset for correlation analysis
+quarterly_gdp_numeric <- cbind(quarterly_gdp_numeric, Real_GDP = df_clean$Real_GDP)
+
+# Standardize the data again with 'Real_GDP' included
+quarterly_gdp_standardized <- scale(quarterly_gdp_numeric)
+
+# Perform PCA again with 'Real_GDP' included
+pca_result <- prcomp(quarterly_gdp_standardized)
+
+# Get the loadings matrix (pca_result$rotation)
+loadings <- pca_result$rotation
+
+# Get the correlation of Real_GDP with each principal component
+pc_correlation <- cor(quarterly_gdp_numeric$Real_GDP, pca_result$x)
+
+# Print the correlations between Real_GDP and principal components
+print(pc_correlation)
+
+# Identify the principal components most related to Real_GDP
+most_correlated_pc <- which.max(abs(pc_correlation))
+print(paste("Principal Component most correlated with Real_GDP:", most_correlated_pc))
+
+```
+```{r}
+
+```
+```{r}
+# Step 1: Select only numeric columns from df_clean
+df_clean_numeric <- df_clean[, sapply(df_clean, is.numeric)]
+
+# Step 2: Create the correlation matrix
+correlation_matrix <- cor(df_clean_numeric, use = "complete.obs")
+
+# Step 3: Print the correlation matrix
+print(correlation_matrix)
+
+
+# Melt the correlation matrix into long format for easier plotting
+correlation_melted <- melt(correlation_matrix)
+
+# Create a heatmap of the correlation matrix
+ggplot(correlation_melted, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Correlation Matrix Heatmap", x = "Variables", y = "Variables", fill = "Correlation")
+
+```
+```{r}
+# Assuming adf_results contains the names of stationary columns
+
+# Step 1: Filter the df_clean to only include stationary columns
+stationary_data <- df_clean[, adf_results]
+
+# Step 2: Perform further analysis (e.g., PCA, regression, etc.) with the stationary variables
+# Example: PCA analysis
+stationary_data_numeric <- stationary_data[, sapply(stationary_data, is.numeric)]  # Ensure we're working with numeric data
+stationary_data_standardized <- scale(stationary_data_numeric)  # Standardize the data for PCA
+
+# Perform PCA
+pca_result <- prcomp(stationary_data_standardized)
+
+# View PCA summary
+summary(pca_result)
+
+```
+
